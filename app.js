@@ -10,16 +10,17 @@ const CONFIG = {
   IDLE_MIN: 30 // автоматичен изход след толкова минути бездействие
 };
 
-const ROLE = { 'Администратор': 3, 'Юрист': 2, 'Наблюдател': 1 };
+const ROLE = { 'Суперадминистратор': 4, 'Администратор': 3, 'Юрист': 2, 'Наблюдател': 1 };
 const CLOSED = ['Отказана – изпратени насоки', 'Приключена'];
 const ERR = {
   auth: 'Сесията изтече. Влезте отново.', forbidden: 'Нямате достъп до платформата.', role: 'Нямате права за това действие.',
-  notfound: 'Заявката не е намерена.', status: 'Невалиден статус.', owner: 'Отговорникът не е активен член на екипа.',
-  email: 'Невалиден имейл.', self: 'Не можете да намалите собствените си права.', lastadmin: 'Трябва да остане поне един активен администратор.',
-  fields: 'Попълнете полето.', network: 'Няма връзка със сървъра. Опитайте отново.'
+  notfound: 'Заявката не е намерена.', status: 'Невалиден статус.', owner: 'Отговорникът трябва да е активен юрист или администратор.',
+  email: 'Невалиден имейл.', self: 'Не можете да променяте собствените си права.', lastadmin: 'Трябва да остане поне един активен суперадминистратор.',
+  fields: 'Попълнете задължителните полета.', date: 'Невалидна дата.', locked: 'Преписката е заключена от администратор.',
+  confirm: 'Номерът за потвърждение не съвпада.', network: 'Няма връзка със сървъра. Опитайте отново.'
 };
 
-const S = { token: '', exp: 0, me: null, statuses: [], roles: [], items: null, team: [], comments: {}, tc: null };
+const S = { token: '', exp: 0, me: null, statuses: [], roles: [], kinds: [], items: null, team: [], comments: {}, tc: null };
 const $ = (sel, el = document) => el.querySelector(sel);
 const app = () => $('#app');
 const esc = v => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -145,7 +146,7 @@ async function start() {
   app().innerHTML = '<div class="gate"><div class="card gate-card"><span class="spin"></span> <span class="muted">Проверка на достъпа…</span></div></div>';
   try {
     const j = await api('me');
-    S.me = j.me; S.statuses = j.statuses; S.roles = j.roles;
+    S.me = j.me; S.statuses = j.statuses; S.roles = j.roles; S.kinds = j.kinds || [];
     idle();
     shell();
     await refresh();
@@ -235,7 +236,7 @@ const isOpen = it => !CLOSED.includes(it.status);
 function rows(items, cols) {
   if (!items.length) return '<div class="empty">Няма заявки.</div>';
   const C = {
-    id: ['№', it => `<a class="id" href="#/r/${encodeURIComponent(it.id)}">${esc(it.id)}</a>${S.comments[it.id] ? ` <span class="small muted" title="Коментари">💬${S.comments[it.id]}</span>` : ''}`],
+    id: ['№', it => `<a class="id" href="#/r/${encodeURIComponent(it.id)}">${esc(it.id)}</a>${it.locked ? ' <span title="Заключена">🔒</span>' : ''}${S.comments[it.id] ? ` <span class="small muted" title="Коментари">💬${S.comments[it.id]}</span>` : ''}`],
     at: ['Получена', it => `<span class="mono">${fmt(it.at, true)}</span>`],
     name: ['Заявител', it => `${esc(it.name)}<br><span class="small muted">${esc(it.city)}</span>`],
     body: ['Задължен субект', it => esc(it.body)],
@@ -347,16 +348,25 @@ function list() {
 
 /* ---------- заявка ---------- */
 
-async function detail(id) {
+/* полета от подадената заявка: [ключ, етикет, вид] */
+const DATA_F = [
+  ['name', 'Заявител', 'text', 120], ['phone', 'Телефон', 'text', 40], ['city', 'Населено място', 'text', 120],
+  ['body', 'Задължен субект', 'text', 200], ['kind', 'Вид отказ', 'kind'], ['no', 'Вх. № на заявлението', 'text', 60],
+  ['reg', 'Дата на регистриране', 'date'], ['dec', 'Дата на решението', 'date'], ['recv', 'Решението е получено на', 'date'],
+  ['appeal', 'Срок за обжалване', 'date'], ['desc', 'Описание', 'area', 4000]
+];
+
+async function detail(id, editing) {
   view().innerHTML = '<p class="muted"><span class="spin"></span> Зареждане…</p>';
   let j;
   try { j = await api('get', { id }); } catch (e) {
     view().innerHTML = `<p><a href="#/requests">← Заявки</a></p><div class="banner bad">${esc(msg(e))}</div>`;
     return;
   }
-  const it = j.item, edit = can(2);
+  const it = j.item;
+  const adm = can(3), edit = can(2) && (!it.locked || adm);
   const files = /^https:\/\/drive\.google\.com\//.test(it.files) ? it.files : '';
-  const F = [
+  const shown = [
     ['Получена', fmt(it.at, true)],
     ['Заявител', esc(it.name)],
     ['Имейл (Google)', it.email ? `<a href="mailto:${esc(it.email)}">${esc(it.email)}</a>` : '—'],
@@ -370,15 +380,30 @@ async function detail(id) {
     ['Решението е получено на', fmt(it.recv)],
     ['Срок за обжалване', due(it)]
   ];
+  const kinds = S.kinds.includes(it.kind) || !it.kind ? S.kinds : [it.kind].concat(S.kinds);
+  const dataForm = `<p class="small muted" style="margin:0 0 12px">Коригирайте данните, ако не съответстват на документите. Всяка промяна се записва в историята.</p>
+    ${DATA_F.map(([k, l, t, n]) => `<div class="field"><label for="d-${k}">${l}</label>${
+      t === 'kind' ? `<select id="d-${k}">${kinds.map(x => `<option${x === it.kind ? ' selected' : ''}>${esc(x)}</option>`).join('')}</select>`
+      : t === 'date' ? `<input id="d-${k}" type="date" value="${/^\d{4}-\d{2}-\d{2}$/.test(it[k]) ? esc(it[k]) : ''}">`
+      : t === 'area' ? `<textarea id="d-${k}" maxlength="${n}" style="min-height:140px">${esc(it[k])}</textarea>`
+      : `<input id="d-${k}" maxlength="${n}" value="${esc(it[k])}">`}</div>`).join('')}
+    <div class="row"><button class="btn primary" id="dsave">Запази корекциите</button><button class="btn ghost" id="dcancel">Откажи</button></div>`;
+
   view().innerHTML = `
     <p><a href="#/requests">← Заявки</a></p>
-    <div class="head"><div class="row"><h1>${esc(it.id)}</h1>${badge(it.status)}</div>
-      <div class="row">${files ? `<a class="btn" href="${esc(files)}" target="_blank" rel="noopener noreferrer">📁 Документи в Drive</a>` : ''}</div></div>
+    <div class="head"><div class="row"><h1>${esc(it.id)}</h1>${badge(it.status)}${it.locked ? '<span class="badge b-bad">🔒 Заключена</span>' : ''}</div>
+      <div class="row">
+        ${files ? `<a class="btn" href="${esc(files)}" target="_blank" rel="noopener noreferrer">📁 Документи в Drive</a>` : ''}
+        ${adm ? `<button class="btn" id="lock">${it.locked ? '🔓 Отключи' : '🔒 Заключи'}</button>` : ''}
+        ${can(4) ? '<button class="btn" id="del" style="color:var(--bad)">Изтрий</button>' : ''}
+      </div></div>
+    ${it.locked ? `<div class="banner">Преписката е заключена. ${adm ? 'Юристите и наблюдателите не могат да я редактират и коментират.' : 'Само администратор може да я редактира и коментира.'}</div>` : ''}
     <div class="grid cols-2">
       <div class="grid" style="align-content:start">
-        <section class="card"><h2 style="margin-bottom:12px">Данни</h2>
-          <dl class="fields">${F.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
-          ${it.desc ? `<h3 style="margin-top:16px">Описание</h3><div class="desc">${esc(it.desc)}</div>` : ''}
+        <section class="card"><div class="head" style="margin-bottom:12px"><h2>Данни от заявката</h2>
+            ${edit && !editing ? '<button class="btn" id="dedit">✎ Коригирай</button>' : ''}</div>
+          ${editing && edit ? dataForm : `<dl class="fields">${shown.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
+          ${it.desc ? `<h3 style="margin-top:16px">Описание</h3><div class="desc">${esc(it.desc)}</div>` : ''}`}
         </section>
         <section class="card"><h2 style="margin-bottom:8px">Вътрешни коментари</h2>
           <p class="small muted" style="margin:0 0 8px">Видими само за екипа.</p>
@@ -391,30 +416,56 @@ async function detail(id) {
         <section class="card"><h2 style="margin-bottom:12px">Обработка</h2>
           <div class="field"><label for="est">Статус</label><select id="est" ${edit ? '' : 'disabled'}>
             ${S.statuses.map(s => `<option${s === it.status ? ' selected' : ''}>${esc(s)}</option>`).join('')}</select></div>
-          <div class="field"><label for="eown">Отговорник</label><select id="eown" ${edit ? '' : 'disabled'}>
+          <div class="field"><label for="eown">Отговорник</label><select id="eown" ${edit && adm ? '' : 'disabled'}>
             <option value="">— без отговорник —</option>
-            ${S.team.filter(m => ROLE[m.role] >= 2 || m.email === it.owner).map(m => `<option value="${esc(m.email)}"${m.email === it.owner ? ' selected' : ''}>${esc(m.name || m.email)}</option>`).join('')}
+            ${S.team.filter(m => ROLE[m.role] >= 2 || m.email === it.owner).map(m => `<option value="${esc(m.email)}"${m.email === it.owner ? ' selected' : ''}>${esc(m.name || m.email)} · ${esc(m.role)}</option>`).join('')}
             ${it.owner && !S.team.some(m => m.email === it.owner) ? `<option value="${esc(it.owner)}" selected>${esc(it.owner)}</option>` : ''}
-          </select></div>
+          </select>${!adm ? '<p class="small muted" style="margin:4px 0 0">Към отговорник насочва администратор.</p>' : ''}</div>
           <div class="field"><label for="enote">Бележка към заявителя</label><textarea id="enote" maxlength="2000" ${edit ? '' : 'disabled'}>${esc(it.note)}</textarea></div>
           ${edit ? `<label class="check field"><input type="checkbox" id="enotify" checked> Уведоми заявителя по имейл при смяна на статуса или бележката</label>
-            <button class="btn primary" id="esave">Запази</button>` : '<p class="small muted">Ролята „Наблюдател“ е само за преглед.</p>'}
+            <button class="btn primary" id="esave">Запази</button>`
+            : `<p class="small muted">${it.locked ? 'Преписката е заключена.' : 'Ролята „Наблюдател“ е само за преглед.'}</p>`}
         </section>
         <section class="card"><h2 style="margin-bottom:8px">История</h2>
           <ul class="feed">${j.history.length ? j.history.map(h => `<li><div class="meta">${who(h.user)} · ${fmt(h.at, true)}</div><div class="txt">${esc(h.action)}${h.details ? ': ' + esc(h.details) : ''}</div></li>`).join('') : '<li class="muted">Няма промени през платформата.</li>'}</ul>
         </section>
       </div>
     </div>`;
-  if (!edit) return;
-  $('#esave').onclick = async () => {
-    const b = $('#esave'); b.disabled = true;
-    const data = { id: it.id, status: $('#est').value, owner: $('#eown').value, note: $('#enote').value, notify: $('#enotify').checked };
+
+  const save = async (btn, data, ok) => {
+    btn.disabled = true;
     try {
-      const r = await api('update', data);
-      toast(!r.changed ? 'Няма промени.' : r.mailed ? 'Запазено. Заявителят е уведомен.' : 'Запазено.');
-      if (r.changed) { await refresh(); detail(it.id); } else b.disabled = false;
-    } catch (e) { toast(msg(e)); b.disabled = false; }
+      const r = await api('update', Object.assign({ id: it.id }, data));
+      toast(!r.changed ? 'Няма промени.' : r.mailed ? 'Запазено. Заявителят е уведомен.' : ok || 'Запазено.');
+      if (r.changed) { await refresh(); detail(it.id); } else btn.disabled = false;
+    } catch (e) { toast(msg(e)); btn.disabled = false; }
   };
+
+  if ($('#lock')) $('#lock').onclick = async () => {
+    const b = $('#lock'); b.disabled = true;
+    try { await api('lock', { id: it.id, locked: !it.locked }); toast(it.locked ? 'Преписката е отключена.' : 'Преписката е заключена.'); await refresh(); detail(it.id); }
+    catch (e) { toast(msg(e)); b.disabled = false; }
+  };
+  if ($('#del')) $('#del').onclick = async () => {
+    const c = prompt(`Изтриване на преписка ${it.id}\n\nРедът в таблицата и коментарите се изтриват окончателно. Папката с документите отива в кошчето на Drive (30 дни).\n\nЗа потвърждение въведете номера ${it.id}:`);
+    if (c == null) return;
+    if (c.trim() !== it.id) return toast(ERR.confirm);
+    const b = $('#del'); b.disabled = true;
+    try { await api('remove', { id: it.id, confirm: c.trim() }); toast(`Преписка ${it.id} е изтрита.`); await refresh(); location.hash = '#/requests'; }
+    catch (e) { toast(msg(e)); b.disabled = false; }
+  };
+  if (!edit) return;
+  if ($('#dedit')) $('#dedit').onclick = () => detail(it.id, true);
+  if ($('#dcancel')) $('#dcancel').onclick = () => detail(it.id);
+  if ($('#dsave')) $('#dsave').onclick = () => {
+    const fields = {};
+    DATA_F.forEach(([k]) => { const v = $('#d-' + k).value.trim(); if (v !== (it[k] || '')) fields[k] = v; });
+    if (!Object.keys(fields).length) return detail(it.id);
+    if (fields.name === '' || fields.body === '') return toast(ERR.fields);
+    save($('#dsave'), { fields }, 'Корекциите са запазени.');
+  };
+  $('#esave').onclick = () => save($('#esave'), Object.assign(
+    { status: $('#est').value, note: $('#enote').value, notify: $('#enotify').checked }, adm ? { owner: $('#eown').value } : {}));
   $('#csend').onclick = async () => {
     const t = $('#ctext').value.trim();
     if (!t) return toast(ERR.fields);
@@ -426,10 +477,15 @@ async function detail(id) {
 
 /* ---------- екип (администратор) ---------- */
 
+/* администраторът управлява юристи и наблюдатели; суперадминистраторът – всички */
+const manages = role => can(4) || ROLE[role] < 3;
+
 async function team() {
   view().innerHTML = '<p class="muted"><span class="spin"></span> Зареждане…</p>';
   let list;
   try { list = (await api('team')).team; } catch (e) { view().innerHTML = `<div class="banner bad">${esc(msg(e))}</div>`; return; }
+  const roles = S.roles.filter(manages);
+  const sync = () => { S.team = list.filter(m => m.active).map(m => ({ email: m.email, name: m.name, role: m.role })); };
   const draw = () => {
     view().innerHTML = `
       <div class="head"><h1>Екип</h1></div>
@@ -438,16 +494,24 @@ async function team() {
           ${list.map(m => `<tr><td><b>${esc(m.name || '—')}</b><br><span class="small muted">${esc(m.email)}</span></td>
             <td>${esc(m.role)}</td><td>${m.active ? '<span class="badge b-ok">Активен</span>' : '<span class="badge">Деактивиран</span>'}</td>
             <td class="small muted">${fmt(m.added, true)}${m.by ? '<br>' + esc(m.by) : ''}</td>
-            <td><button class="btn" data-e="${esc(m.email)}">Промени</button></td></tr>`).join('')}
+            <td><div class="row" style="flex-wrap:nowrap">
+              ${manages(m.role) && m.email !== S.me.email ? `<button class="btn" data-e="${esc(m.email)}">Промени</button>` : ''}
+              ${can(4) && m.email !== S.me.email ? `<button class="btn" data-x="${esc(m.email)}" style="color:var(--bad)" title="Изтрий">✕</button>` : ''}
+            </div></td></tr>`).join('')}
         </tbody></table></div>
         <section class="card" style="align-self:start"><h2 id="tf-h" style="margin-bottom:12px">Добави член</h2>
           <div class="field"><label for="tem">Google имейл</label><input id="tem" type="email" autocomplete="off" placeholder="name@gmail.com"></div>
           <div class="field"><label for="tnm">Име</label><input id="tnm" maxlength="120"></div>
-          <div class="field"><label for="trl">Роля</label><select id="trl">${S.roles.map(r => `<option>${esc(r)}</option>`).join('')}</select></div>
+          <div class="field"><label for="trl">Роля</label><select id="trl">${roles.map(r => `<option>${esc(r)}</option>`).join('')}</select></div>
           <label class="check field"><input type="checkbox" id="tac" checked> Активен</label>
           <div class="row"><button class="btn primary" id="tsave">Запази</button><button class="btn ghost" id="tnew">Нов</button></div>
-          <p class="small muted" style="margin-top:12px"><b>Администратор</b> – всичко, вкл. екип и дневник. <b>Юрист</b> – обработва заявки и пише коментари. <b>Наблюдател</b> – само преглед.
-          Деактивираният член губи достъп веднага при следващата си заявка към сървъра.</p>
+          <ul class="small muted" style="margin:14px 0 0;padding-left:18px">
+            <li><b>Суперадминистратор</b> – всичко; трие преписки и членове на екипа; управлява администраторите.</li>
+            <li><b>Администратор</b> – член на екипа на ЗДОИ4You: администрира преписките, заключва ги и ги насочва към отговорник; добавя юристи и наблюдатели.</li>
+            <li><b>Юрист</b> – обработва незаключените преписки: статус, бележка, корекция на данните, коментари.</li>
+            <li><b>Наблюдател</b> – само преглед.</li>
+          </ul>
+          <p class="small muted" style="margin-top:8px">Деактивираният член губи достъп при следващото си действие в платформата.</p>
         </section>
       </div>`;
     $('#trl').value = 'Юрист';
@@ -457,14 +521,19 @@ async function team() {
       $('#tnm').value = m ? m.name : ''; $('#trl').value = m ? m.role : 'Юрист'; $('#tac').checked = m ? m.active : true;
     };
     view().querySelectorAll('[data-e]').forEach(b => b.onclick = () => { fill(list.find(m => m.email === b.dataset.e)); $('#tnm').focus(); });
+    view().querySelectorAll('[data-x]').forEach(b => b.onclick = async () => {
+      const m = list.find(x => x.email === b.dataset.x);
+      if (!confirm(`Да изтрия ли ${m.name || m.email} (${m.email}, ${m.role}) от екипа?\n\nДостъпът спира веднага. Ако искате само временно да спрете достъпа, използвайте „Промени“ → „Активен“.`)) return;
+      b.disabled = true;
+      try { list = (await api('teamRemove', { email: m.email })).team; sync(); toast('Членът е изтрит.'); draw(); }
+      catch (e) { toast(msg(e)); b.disabled = false; }
+    });
     $('#tnew').onclick = () => fill(null);
     $('#tsave').onclick = async () => {
       const b = $('#tsave'); b.disabled = true;
       try {
-        const r = await api('teamSave', { email: $('#tem').value, name: $('#tnm').value, role: $('#trl').value, active: $('#tac').checked });
-        list = r.team;
-        S.team = list.filter(m => m.active).map(m => ({ email: m.email, name: m.name, role: m.role }));
-        toast('Екипът е обновен.'); draw();
+        list = (await api('teamSave', { email: $('#tem').value, name: $('#tnm').value, role: $('#trl').value, active: $('#tac').checked })).team;
+        sync(); toast('Екипът е обновен.'); draw();
       } catch (e) { toast(msg(e)); b.disabled = false; }
     };
   };
